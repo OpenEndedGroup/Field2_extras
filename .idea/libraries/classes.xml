@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="classes">
+    <CLASSES>
+      <root url="file://$USER_HOME$/fieldwork2_altbuild/build/classes" />
+      <root url="jar://$USER_HOME$/fieldwork2_altbuild/build/field_linker.jar!/" />
+      <root url="jar://$USER_HOME$/fieldwork2_altbuild/build/field_agent.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
