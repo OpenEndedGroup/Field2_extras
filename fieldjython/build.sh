@@ -1,4 +1,14 @@
-field=$1
+#!/usr/bin/env bash
+set -u -o pipefail
+
+if [ -z "${1-}" ]; then
+    echo
+    echo Usage: ./build.sh path_to_field2_repository
+    echo
+    exit
+fi
+
+field="$(cd "$(dirname "$1")"; pwd)/$(basename "$1")"
 
 root=`dirname $0`
 cd $root
@@ -11,8 +21,11 @@ function join() {
 
 echo -- using javac from : --
 echo `which javac` / `javac -fullversion`
+echo
 
 echo -- using Field2 from : --
+echo $field
+echo
 
 
 echo -- removing build directory --
