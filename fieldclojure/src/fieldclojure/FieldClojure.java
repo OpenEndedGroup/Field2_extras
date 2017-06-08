@@ -3,9 +3,7 @@ package fieldclojure;
 import clojure.java.api.Clojure;
 import clojure.lang.Compiler;
 import clojure.lang.*;
-import field.utility.Dict;
-import field.utility.Log;
-import field.utility.Pair;
+import field.utility.*;
 import fieldbox.boxes.Box;
 import fieldbox.boxes.Boxes;
 import fieldbox.boxes.Drawing;
@@ -14,28 +12,34 @@ import fieldbox.boxes.plugins.IsExecuting;
 import fieldbox.execution.Completion;
 import fieldbox.execution.Execution;
 import fieldbox.execution.JavaSupport;
+import fieldbox.io.IO;
 import fielded.Animatable;
+import fielded.plugins.Out;
 import fieldnashorn.Nashorn;
 
+import java.io.IOException;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.io.Writer;
 import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static field.utility.Log.log;
 
-public class FieldClojure extends Execution {
+public class FieldClojure extends Execution implements IO.Loaded {
 
 
 	private final IFn src;
+	private Out output;
 
 	public FieldClojure(Box root) {
 		super(null);
 
-		Log.log("startup.clojure", ()->"Clojure plugin is starting up ");
+		Log.log("startup.clojure", () -> "Clojure plugin is starting up ");
 
 		ns = Clojure.var(nsClojure, "*ns*");
 		out = Clojure.var(nsClojure, "*out*");
@@ -49,14 +53,14 @@ public class FieldClojure extends Execution {
 		completions = Clojure.var("compliment.core", "completions");
 		documentation = Clojure.var("compliment.core", "documentation");
 
-		log("clojure.debug", ()->completions.invoke("al-", null));
+		log("clojure.debug", () -> completions.invoke("al-", null));
 
 		Var.pushThreadBindings(PersistentHashMap.create(ns, Namespace.findOrCreate(
-			    Symbol.create("user"))));
+			Symbol.create("user"))));
 
 		Animatable.registerHandler((was, o) -> {
 			if (o instanceof IFn && !(o instanceof Collection) && !(o instanceof Map)) {
-				log("clojure.debug",()-> "IFn found");
+				log("clojure.debug", () -> "IFn found");
 				return new Animatable.AnimationElement() {
 					@Override
 					public Object middle(boolean isEnding) {
@@ -64,11 +68,11 @@ public class FieldClojure extends Execution {
 					}
 				};
 			}
-			return null;
+			return was;
 		});
 		Animatable.registerHandler((was, o) -> {
 			if (o instanceof IFn && (o instanceof Collection) && !(o instanceof Map)) {
-				log("clojure.debug", ()->"IFn found -- collection");
+				log("clojure.debug", () -> "IFn found -- collection");
 
 				Animatable.AnimationElement start = null;
 				Animatable.AnimationElement middle = null;
@@ -121,11 +125,11 @@ public class FieldClojure extends Execution {
 
 				};
 			}
-			return null;
+			return was;
 		});
 		Animatable.registerHandler((was, o) -> {
 			if (o instanceof IFn && !(o instanceof Collection) && (o instanceof Map)) {
-				log("clojure.debug", ()->"IFn found -- map");
+				log("clojure.debug", () -> "IFn found -- map");
 				Animatable.AnimationElement start = null;
 				Animatable.AnimationElement middle = null;
 				Animatable.AnimationElement end = null;
@@ -179,10 +183,10 @@ public class FieldClojure extends Execution {
 
 				};
 			}
-			return null;
+			return was;
 		});
 
-		Log.log("startup.clojure", ()->"Clojure plugin has finished starting up ");
+		Log.log("startup.clojure", () -> "Clojure plugin has finished starting up ");
 	}
 
 
@@ -214,7 +218,7 @@ public class FieldClojure extends Execution {
 	@Override
 	public Execution.ExecutionSupport support(Box box, Dict.Prop<String> prop) {
 		FunctionOfBox<Boolean> ef = this.properties.get(executionFilter);
-		if (box==this || ef == null || ef.apply(box)) 		return wrap(box, prop);
+		if (box == this || ef == null || ef.apply(box)) return wrap(box, prop);
 		return null;
 	}
 
@@ -222,60 +226,121 @@ public class FieldClojure extends Execution {
 
 		return new Execution.ExecutionSupport() {
 
+			public Triple<Box, Integer, Boolean> currentLineNumber;
 			public int lineOffset = 0;
 
 			@Override
 			public Object executeTextFragment(String textFragment, String suffix, Consumer<String> success, Consumer<Pair<Integer, String>> lineErrors) {
 
-				try{
+				try {
+					currentLineNumber = null;
+
 					Execution.context.get().push(box);
-					log("clojure.debug", ()->"ns at entry :" + ((Var) ns).get());
+					log("clojure.debug", () -> "ns at entry :" + ((Var) ns).get());
 
 					String sticky = box.properties.get(_clojureNS);
 					if (sticky != null) {
 						eval("(ns " + sticky + ")", null);
 					}
 
-					log("clojure.debug", ()->"ns at entry after sticky :" + ((Var) ns).get());
+					log("clojure.debug", () -> "ns at entry after sticky :" + ((Var) ns).get());
 
 					Object nsOnEntry = ((Var) ns).get();
 
-					StringWriter w = new StringWriter();
-					((Var)out).bindRoot(w);
-					((Var)src).bindRoot(""+box);
-					((Var)Clojure.var( ((Namespace)nsOnEntry).getName(), "_")).bindRoot(box);
+					int[] written = {0};
+					Writer w = new Writer() {
+						@Override
+						public void write(char[] cbuf, int off, int len) throws IOException {
 
-					if (lineOffset>0)
-					{
-						for(int i=0;i<lineOffset;i++)
-							textFragment = "\n"+textFragment;
+							if (len > 0) {
+								String s = new String(cbuf, off, len);
+//							if (s.endsWith("\n"))
+//								s = s.substring(0, s.length() - 1) + "<br>";
+								if (s.trim().length() == 0) return;
+								written[0]++;
+
+								if (currentLineNumber == null || currentLineNumber.first == null || currentLineNumber.second == -1) {
+									final String finalS = s;
+									Set<Consumer<Quad<Box, Integer, String, Boolean>>> o = box.find(Execution.directedOutput, box.upwards())
+																  .collect(Collectors.toSet());
+									o.forEach(x -> x.accept(new Quad<>(box, -1, finalS, true)));
+
+								} else {
+
+									final String finalS = s;
+									Set<Consumer<Quad<Box, Integer, String, Boolean>>> o = box.find(Execution.directedOutput, box.upwards())
+																  .collect(Collectors.toSet());
+
+									if (o.size() > 0) {
+										o.forEach(x -> x.accept(new Quad<>(currentLineNumber.first, currentLineNumber.second, finalS, currentLineNumber.third)));
+									} else {
+//									success.accept(finalS);
+
+										o.forEach(x -> x.accept(new Quad<>(box, -1, finalS, true)));
+
+									}
+								}
+							}
+
+						}
+
+						@Override
+						public void flush() throws IOException {
+						}
+
+						@Override
+						public void close() throws IOException {
+						}
+					};
+
+					if (output!=null)
+						output.setWriter(w, this::setCurrentLineNumberForPrinting);
+
+					StringBuffer prefix = new StringBuffer(Math.max(0, lineOffset));
+					for (int i = 0; i < lineOffset; i++)
+						prefix.append('\n');
+
+
+					((Var) out).bindRoot(w);
+					((Var) src).bindRoot("" + box);
+					((Var) Clojure.var(((Namespace) nsOnEntry).getName(), "_")).bindRoot(box);
+
+					if (lineOffset > 0) {
+						for (int i = 0; i < lineOffset; i++)
+							textFragment = "\n" + textFragment;
 					}
 					final String finalTextFragment = textFragment;
-					log("clojure.debug", ()->" execute text fragment on :" + finalTextFragment + "(line offset)"+lineOffset);
+					log("clojure.debug", () -> " execute text fragment on :" + finalTextFragment + "(line offset)" + lineOffset);
 
 					Object result = eval(textFragment, lineErrors);
 
-						w.append("\n" + (result != null ? ("" + result) : ""));
-					success.accept(w.toString());
+					if (written[0] == 0) w.append("\n" + (result != null ? ("" + result) : ""));
+//					success.accept(w.toString());
 
-					log("clojure.debug", ()->" result string is " + out);
+					log("clojure.debug", () -> " result string is " + out);
 
-					log("clojure.debug", ()->"ns at exit :" + ((Var) ns).get());
+					log("clojure.debug", () -> "ns at exit :" + ((Var) ns).get());
 
 					Object nsAtExit = ((Var) ns).get();
 					if (!nsAtExit.equals(nsOnEntry)) {
-						log("clojure.debug", ()->"ns has changed, setting sticky");
+						log("clojure.debug", () -> "ns has changed, setting sticky");
 						box.properties.put(_clojureNS, ((Namespace) nsAtExit).getName()
 												     .getName());
 					}
 
 
 					return result;
-				}
-				finally
-				{
+
+				} catch (IOException e) {
+					e.printStackTrace();
+				} finally {
 					Execution.context.get().pop();
 				}
+				return null;
+			}
+
+			private void setCurrentLineNumberForPrinting(Triple<Box, Integer, Boolean> boxLine) {
+				currentLineNumber = boxLine;
 			}
 
 
@@ -305,7 +370,7 @@ public class FieldClojure extends Execution {
 			@Override
 			public String begin(Consumer<Pair<Integer, String>> lineErrors, Consumer<String> success, Map<String, Object> initiator) {
 
-				log("clojure.debug", ()->"ns at entry :" + ((Var) ns).get());
+				log("clojure.debug", () -> "ns at entry :" + ((Var) ns).get());
 
 				String sticky = box.properties.get(_clojureNS);
 				if (sticky != null) {
@@ -316,7 +381,7 @@ public class FieldClojure extends Execution {
 				}
 
 				String stuck = sticky; // effectively final
-				((Var)Clojure.var(sticky, "_")).bindRoot(box);
+				((Var) Clojure.var(sticky, "_")).bindRoot(box);
 
 				Var v = (Var) Clojure.var(sticky, "_r");
 				final Var finalV = v;
@@ -327,7 +392,7 @@ public class FieldClojure extends Execution {
 
 				initiator.entrySet()
 					 .forEach(x -> {
-						 ((Var)Clojure.var(stuck, x.getKey())).bindRoot(x.getValue());
+						 ((Var) Clojure.var(stuck, x.getKey())).bindRoot(x.getValue());
 					 });
 
 				executeAll(allText, lineErrors, success);
@@ -343,9 +408,9 @@ public class FieldClojure extends Execution {
 				v = (Var) Clojure.var(sticky, "_r");
 				Object ret = v.get();
 
-				log("clojure.debug", ()->"_r at eXit :" + ret);
+				log("clojure.debug", () -> "_r at eXit :" + ret);
 
-				log("clojure.debug", ()->"invoking");
+				log("clojure.debug", () -> "invoking");
 
 
 				Animatable.AnimationElement ae = Animatable.interpret(ret, null);
@@ -420,12 +485,12 @@ public class FieldClojure extends Execution {
 
 				final int finalSubStart = subStart;
 				final int finalSubEnd = subEnd;
-				log("clojure.debug", ()->"parsed line <" + lines[line] + "> __prefix__ is " + finalSubStart + " -> " + finalSubEnd);
+				log("clojure.debug", () -> "parsed line <" + lines[line] + "> __prefix__ is " + finalSubStart + " -> " + finalSubEnd);
 
 				String mid = lines[line].substring(0, subStart) + " __prefix__ " + lines[line].substring(subEnd, lines[line].length());
 
 				final String finalSub = sub;
-				log("clojure.debug", ()->"parsed line thus " + mid + " / " + finalSub);
+				log("clojure.debug", () -> "parsed line thus " + mid + " / " + finalSub);
 
 
 				Execution.context.get().push(box);
@@ -434,7 +499,7 @@ public class FieldClojure extends Execution {
 
 					Object ret = completions.invoke(sub, before + mid + "\n" + after);
 
-					log("clojure.debug", ()->"result :" + ret);
+					log("clojure.debug", () -> "result :" + ret);
 
 
 					List<Completion> c = new ArrayList<Completion>();
@@ -443,15 +508,13 @@ public class FieldClojure extends Execution {
 //						Object testEval = eval(s, null);
 //						log("clojure.debug", ()->" s -> " + testEval);
 
-						c.add(new Completion(before.length() + subStart, before.length() + subEnd, ""+s.valAt(Keyword.intern("candidate")), "<span class=type>" + s.valAt(Keyword.intern("type")) + "</span>"+"<span class=doc>" + documentation.invoke(s.valAt(Keyword.intern("candidate")), s.valAt(Keyword.intern("ns"))) + "</span>"));
+						c.add(new Completion(before.length() + subStart, before.length() + subEnd, "" + s.valAt(Keyword.intern("candidate")), "<span class=type>" + s.valAt(Keyword.intern("type")) + "</span>" + "<span class=doc>" + documentation.invoke(s.valAt(Keyword.intern("candidate")), s.valAt(Keyword.intern("ns"))) + "</span>"));
 					}
 
 
-					log("clojure.debug", ()->"completions are :" + c);
+					log("clojure.debug", () -> "completions are :" + c);
 					results.accept(c);
-				}
-				finally
-				{
+				} finally {
 					Execution.context.get().pop();
 
 				}
@@ -498,7 +561,7 @@ public class FieldClojure extends Execution {
 				}
 				List<Pair<String, String>> possibleJavaClassesFor = JavaSupport.javaSupport.getPossibleJavaClassesFor(sub);
 
-				Log.log("completion.debug", ()->" possible javaclasses :" + possibleJavaClassesFor);
+				Log.log("completion.debug", () -> " possible javaclasses :" + possibleJavaClassesFor);
 
 				subStart += before.length();
 				subEnd += before.length();
@@ -543,15 +606,15 @@ public class FieldClojure extends Execution {
 				defLn = rdr.getLineNumber();
 
 				final int finalDefLn = defLn;
-				log("clojure.debug", ()->"line number on entry is :"+ finalDefLn);
+				log("clojure.debug", () -> "line number on entry is :" + finalDefLn);
 				Object r = LispReader.read(rdr, false, EOF, false);
 				if (r == EOF) {
 					break;
 				}
-				log("clojure.debug", ()->" form is :" + r + " " + Thread.currentThread()
-										    .getContextClassLoader());
+				log("clojure.debug", () -> " form is :" + r + " " + Thread.currentThread()
+											  .getContextClassLoader());
 				Object ret = Compiler.eval(r);
-				log("clojure.debug", ()->" ret is " + ret);
+				log("clojure.debug", () -> " ret is " + ret);
 				result = ret;
 			} catch (Throwable e) {
 				if (lineErrors == null) return null;
@@ -570,7 +633,7 @@ public class FieldClojure extends Execution {
 
 				c.printStackTrace();
 
-				lineErrors.accept(new Pair<>(firstLn==-1 ? defLn : (firstLn+defLn), "" + c));
+				lineErrors.accept(new Pair<>(firstLn == -1 ? defLn : (firstLn + defLn), "" + c));
 				break;
 			}
 		}
@@ -581,14 +644,21 @@ public class FieldClojure extends Execution {
 		Pattern p = Pattern.compile("bx\\[.*\\]");
 		for (StackTraceElement s : c.getStackTrace()) {
 
-			if (s.getFileName()==null) continue;
+			if (s.getFileName() == null) continue;
 
-			if (p.matcher(s.getFileName()).find())
-			{
+			if (p.matcher(s.getFileName()).find()) {
 				return s.getLineNumber();
 			}
 		}
 		return -1;
+	}
+
+	@Override
+	public void loaded() {
+		output = this.find(Out.__out, both())
+			     .findFirst()
+			     .orElseThrow(() -> new IllegalStateException("Can't find html output support"));
+
 	}
 
 

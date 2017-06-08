@@ -17,4 +17,10 @@ In your `~/.field/plugins.edn` add something along the lines of:
 "/Users/marc/fieldwork2_extras/fieldclojure/lib/jars/*"] }`
 
 Changing `/Users/marc/fieldwork2_extras` to the appropriate path. 
- 
+
+### Usage
+Inside Field, code like:
+
+`_.ensureChildOfClass("clojure", Java.type('fieldclojure.FieldClojure').class)`
+
+Will create (if needed) a child box called "clojure" that has Clojure as its language. All children of this box will also be in Clojure.

@@ -1,8 +1,6 @@
 package fieldjython;
 
-import field.utility.Dict;
-import field.utility.Log;
-import field.utility.Pair;
+import field.utility.*;
 import fieldbox.boxes.Box;
 import fieldbox.boxes.Boxes;
 import fieldbox.boxes.Drawing;
@@ -11,8 +9,10 @@ import fieldbox.boxes.plugins.IsExecuting;
 import fieldbox.execution.Completion;
 import fieldbox.execution.Execution;
 import fieldbox.execution.JavaSupport;
+import fieldbox.io.IO;
 import fielded.Animatable;
 import fielded.TextUtils;
+import fielded.plugins.Out;
 import fieldnashorn.TernSupport;
 import org.python.core.Py;
 import org.python.core.PyFunction;
@@ -27,12 +27,14 @@ import java.io.Writer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static field.utility.Log.log;
@@ -40,11 +42,12 @@ import static field.utility.Log.log;
 /**
  * Created by marc on 10/23/14.
  */
-public class FieldJython extends Execution {
+public class FieldJython extends Execution implements IO.Loaded {
 
 	Lock lock = new ReentrantLock();
 	Map<Box, ExecutionSupport> knownInterpreters = new MapMaker().weakKeys()
 								     .makeMap();
+	private Out output;
 
 	public FieldJython(Box root) {
 		super(null);
@@ -57,14 +60,9 @@ public class FieldJython extends Execution {
 		Animatable.registerHandler((was, o) -> {
 			if (o instanceof PyFunction) {
 				log("jython.debug", ()->"jython found");
-				return new Animatable.AnimationElement() {
-					@Override
-					public Object middle(boolean isEnding) {
-						return ((PyFunction) o).__call__();
-					}
-				};
+				return (Animatable.AnimationElement) isEnding -> ((PyFunction) o).__call__();
 			}
-			return null;
+			return was;
 		});
 
 
@@ -93,6 +91,12 @@ public class FieldJython extends Execution {
 
 		return new ExecutionSupport() {
 
+			public Dict.Prop<String> originProperty;
+			public int lineOffset;
+			public String filename;
+
+			public Triple<Box, Integer, Boolean> currentLineNumber;
+
 			PythonInterpreter py = new PythonInterpreter();
 
 			long uniq;
@@ -105,14 +109,48 @@ public class FieldJython extends Execution {
 				try {
 					Execution.context.get()
 							 .push(box);
+
+					currentLineNumber = null;
+
+
 					final String finalTextFragment = textFragment;
 					log("jython.debug", ()->" execute text fragment on :" + finalTextFragment);
 					int[] written = {0};
 					Writer w = new Writer() {
 						@Override
 						public void write(char[] cbuf, int off, int len) throws IOException {
-							success.accept(new String(cbuf, off, len));
-							written[0] += len;
+
+							if (len > 0) {
+								String s = new String(cbuf, off, len);
+//							if (s.endsWith("\n"))
+//								s = s.substring(0, s.length() - 1) + "<br>";
+								if (s.trim().length() == 0) return;
+								written[0]++;
+
+								if (currentLineNumber == null || currentLineNumber.first == null || currentLineNumber.second == -1) {
+									final String finalS = s;
+									Set<Consumer<Quad<Box, Integer, String, Boolean>>> o = box.find(Execution.directedOutput, box.upwards())
+																  .collect(Collectors.toSet());
+									o.forEach(x -> x.accept(new Quad<>(box, -1, finalS, true)));
+
+								}
+								else {
+
+									final String finalS = s;
+									Set<Consumer<Quad<Box, Integer, String, Boolean>>> o = box.find(Execution.directedOutput, box.upwards())
+																  .collect(Collectors.toSet());
+
+									if (o.size()>0) {
+										o.forEach(x -> x.accept(new Quad<>(currentLineNumber.first, currentLineNumber.second, finalS, currentLineNumber.third)));
+									} else {
+//									success.accept(finalS);
+
+										o.forEach(x -> x.accept(new Quad<>(box, -1, finalS, true)));
+
+									}
+								}
+							}
+
 						}
 
 						@Override
@@ -124,7 +162,13 @@ public class FieldJython extends Execution {
 						}
 					};
 
-					Object result = eval(box, w, textFragment, lineErrors);
+					output.setWriter(w, this::setCurrentLineNumberForPrinting);
+
+					StringBuffer prefix = new StringBuffer(Math.max(0, lineOffset));
+					for (int i = 0; i < lineOffset; i++)
+						prefix.append('\n');
+
+					Object result = eval(box, w, prefix+textFragment, lineErrors);
 					if (written[0] == 0) w.write("" + (result.equals(Py.None) ? " &#10003; " : ("" + result)));
 
 					log("jython.debug", ()->" result string is " + result);
@@ -209,6 +253,10 @@ public class FieldJython extends Execution {
 
 			@Override
 			public void setConsoleOutput(Consumer<String> stdout, Consumer<String> stderr) {
+			}
+
+			private void setCurrentLineNumberForPrinting(Triple<Box, Integer, Boolean> boxLine) {
+				currentLineNumber = boxLine;
 			}
 
 			@Override
@@ -352,6 +400,10 @@ public class FieldJython extends Execution {
 				py.set(r, v);
 			}
 
+			public void setFilenameForStacktraces(String filename) {
+				this.filename = filename;
+			}
+
 
 			protected Object eval(Box box, Writer output, String textFragment, Consumer<Pair<Integer, String>> lineErrors) {
 
@@ -359,8 +411,7 @@ public class FieldJython extends Execution {
 
 				if (output != null) py.setOut(output);
 				try {
-//			py.exec(textFragment);
-					PyObject o = py.eval(py.compile(textFragment));
+					PyObject o = py.eval(py.compile(textFragment, filename));
 
 					System.err.println(" --> " + o);
 					return o;
@@ -394,10 +445,24 @@ public class FieldJython extends Execution {
 
 				return null;
 			}
+
+			@Override
+			public void setLineOffsetForFragment(int line, Dict.Prop<String> origin) {
+				lineOffset = line;
+				originProperty = origin;
+			}
 		};
+
 
 	}
 
 
+	@Override
+	public void loaded() {
+		output = this.find(Out.__out, both())
+			    .findFirst()
+			    .orElseThrow(() -> new IllegalStateException("Can't find html output support"));
+
+	}
 }
 

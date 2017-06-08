@@ -17,4 +17,9 @@ In your `~/.field/plugins.edn` add something along the lines of:
 
 Changing `/Users/marc/fieldwork2_extras` to the appropriate path.
  
- 
+### Usage
+Inside Field, code like:
+
+`_.ensureChildOfClass("jython", Java.type('fieldjython.FieldJython').class)`
+
+Will create (if needed) a child box called "jython" that has Python as its language. All children of this box will also be in Python.
